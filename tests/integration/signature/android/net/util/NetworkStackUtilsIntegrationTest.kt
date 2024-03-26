@@ -33,6 +33,7 @@ import android.system.OsConstants.AF_PACKET
 import android.system.OsConstants.ARPHRD_ETHER
 import android.system.OsConstants.ETH_P_IPV6
 import android.system.OsConstants.IPPROTO_UDP
+import android.system.OsConstants.SOCK_CLOEXEC
 import android.system.OsConstants.SOCK_DGRAM
 import android.system.OsConstants.SOCK_NONBLOCK
 import android.system.OsConstants.SOCK_RAW
@@ -45,20 +46,20 @@ import com.android.net.module.util.InterfaceParams
 import com.android.net.module.util.IpUtils
 import com.android.net.module.util.Ipv6Utils
 import com.android.net.module.util.NetworkStackConstants.ETHER_ADDR_LEN
+import com.android.net.module.util.NetworkStackConstants.ETHER_HEADER_LEN
 import com.android.net.module.util.NetworkStackConstants.IPV4_ADDR_ANY
 import com.android.net.module.util.NetworkStackConstants.IPV4_CHECKSUM_OFFSET
 import com.android.net.module.util.NetworkStackConstants.IPV4_FLAGS_OFFSET
 import com.android.net.module.util.NetworkStackConstants.IPV4_FLAG_DF
 import com.android.net.module.util.NetworkStackConstants.IPV4_FLAG_MF
+import com.android.net.module.util.NetworkStackConstants.IPV4_HEADER_MIN_LEN
 import com.android.net.module.util.NetworkStackConstants.IPV6_ADDR_ALL_NODES_MULTICAST
+import com.android.net.module.util.NetworkStackConstants.UDP_HEADER_LEN
 import com.android.net.module.util.structs.PrefixInformationOption
 import com.android.networkstack.util.NetworkStackUtils
 import com.android.testutils.ArpRequestFilter
-import com.android.testutils.ETHER_HEADER_LENGTH
-import com.android.testutils.IPV4_HEADER_LENGTH
 import com.android.testutils.IPv4UdpFilter
 import com.android.testutils.TapPacketReader
-import com.android.testutils.UDP_HEADER_LENGTH
 import java.io.FileDescriptor
 import java.net.Inet4Address
 import java.net.Inet6Address
@@ -154,14 +155,13 @@ class NetworkStackUtilsIntegrationTest {
         assertEquals(TEST_TARGET_MAC, sentTargetAddr, "Destination ethernet address does not match")
 
         val sentDhcpPacket = sentPacket.copyOfRange(
-                ETHER_HEADER_LENGTH + IPV4_HEADER_LENGTH + UDP_HEADER_LENGTH, sentPacket.size)
+                ETHER_HEADER_LEN + IPV4_HEADER_MIN_LEN + UDP_HEADER_LEN, sentPacket.size)
 
         assertArrayEquals("Sent packet != original packet", originalPacket, sentDhcpPacket)
     }
 
-    @Test
-    fun testAttachRaFilter() {
-        val socket = Os.socket(AF_PACKET, SOCK_RAW, ETH_P_IPV6)
+    private fun doTestAttachRaFilter(generic: Boolean) {
+        val socket = Os.socket(AF_PACKET, SOCK_RAW or SOCK_CLOEXEC, 0)
         val ifParams = InterfaceParams.getByName(iface.interfaceName)
                 ?: fail("Could not obtain interface params for ${iface.interfaceName}")
         val socketAddr = SocketUtils.makePacketSocketAddress(ETH_P_IPV6, ifParams.index)
@@ -176,7 +176,11 @@ class NetworkStackUtilsIntegrationTest {
         echo.rewind()
         assertNextPacketEquals(socket, echo.readAsArray(), "ICMPv6 echo")
 
-        NetworkStackUtils.attachRaFilter(socket, ARPHRD_ETHER)
+        if (generic) {
+            NetworkStackUtils.attachControlPacketFilter(socket)
+        } else {
+            NetworkStackUtils.attachRaFilter(socket)
+        }
         // Send another echo, then an RA. After setting the filter expect only the RA.
         echo.rewind()
         reader.sendResponse(echo)
@@ -190,6 +194,16 @@ class NetworkStackUtilsIntegrationTest {
         ra.rewind()
 
         assertNextPacketEquals(socket, ra.readAsArray(), "ICMPv6 RA")
+    }
+
+    @Test
+    fun testAttachRaFilter() {
+        doTestAttachRaFilter(false)
+    }
+
+    @Test
+    fun testRaViaAttachControlPacketFilter() {
+        doTestAttachRaFilter(true)
     }
 
     private fun assertNextPacketEquals(socket: FileDescriptor, expected: ByteArray, descr: String) {
@@ -279,7 +293,7 @@ class NetworkStackUtilsIntegrationTest {
     }
 
     private fun setMfBit(packet: ByteBuffer, set: Boolean) {
-        val offset = ETHER_HEADER_LENGTH + IPV4_FLAGS_OFFSET
+        val offset = ETHER_HEADER_LEN + IPV4_FLAGS_OFFSET
         var flagOff: Int = packet.getShort(offset).toInt()
         if (set) {
             flagOff = (flagOff or IPV4_FLAG_MF) and IPV4_FLAG_DF.inv()
@@ -288,17 +302,20 @@ class NetworkStackUtilsIntegrationTest {
         }
         packet.putShort(offset, flagOff.toShort())
         // Recalculate the checksum, which requires first clearing the checksum field.
-        val checksumOffset = ETHER_HEADER_LENGTH + IPV4_CHECKSUM_OFFSET
+        val checksumOffset = ETHER_HEADER_LEN + IPV4_CHECKSUM_OFFSET
         packet.putShort(checksumOffset, 0)
-        packet.putShort(checksumOffset, IpUtils.ipChecksum(packet, ETHER_HEADER_LENGTH))
+        packet.putShort(checksumOffset, IpUtils.ipChecksum(packet, ETHER_HEADER_LEN))
     }
 
-    @Test
-    fun testDhcpResponseWithMfBitDropped() {
+    private fun doTestDhcpResponseWithMfBitDropped(generic: Boolean) {
         val ifindex = InterfaceParams.getByName(iface.interfaceName).index
         val packetSock = Os.socket(AF_PACKET, SOCK_RAW or SOCK_NONBLOCK, /*protocol=*/0)
         try {
-            NetworkStackUtils.attachDhcpFilter(packetSock)
+            if (generic) {
+                NetworkStackUtils.attachControlPacketFilter(packetSock)
+            } else {
+                NetworkStackUtils.attachDhcpFilter(packetSock)
+            }
             val addr = SocketUtils.makePacketSocketAddress(OsConstants.ETH_P_IP, ifindex)
             Os.bind(packetSock, addr)
             val packet = DhcpPacket.buildNakPacket(DhcpPacket.ENCAP_L2, 42,
@@ -318,6 +335,16 @@ class NetworkStackUtilsIntegrationTest {
         } finally {
             Os.close(packetSock)
         }
+    }
+
+    @Test
+    fun testDhcpResponseWithMfBitDropped() {
+        doTestDhcpResponseWithMfBitDropped(false)
+    }
+
+    @Test
+    fun testGenericDhcpResponseWithMfBitDropped() {
+        doTestDhcpResponseWithMfBitDropped(true)
     }
 }
 

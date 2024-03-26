@@ -23,7 +23,6 @@ import static android.net.dhcp.DhcpPacket.ENCAP_BOOTP;
 import static android.net.dhcp.IDhcpServer.STATUS_INVALID_ARGUMENT;
 import static android.net.dhcp.IDhcpServer.STATUS_SUCCESS;
 import static android.net.dhcp.IDhcpServer.STATUS_UNKNOWN_ERROR;
-import static android.provider.DeviceConfig.NAMESPACE_CONNECTIVITY;
 import static android.system.OsConstants.AF_INET;
 import static android.system.OsConstants.IPPROTO_UDP;
 import static android.system.OsConstants.SOCK_DGRAM;
@@ -233,7 +232,7 @@ public class DhcpServer extends StateMachine {
 
         @Override
         public boolean isFeatureEnabled(@NonNull Context context, @NonNull String name) {
-            return DeviceConfigUtils.isFeatureEnabled(context, NAMESPACE_CONNECTIVITY, name);
+            return DeviceConfigUtils.isNetworkStackFeatureEnabled(context, name);
         }
     }
 
@@ -702,7 +701,8 @@ public class DhcpServer extends StateMachine {
                 // TODO (b/144402437): advertise the URL if known
                 null /* captivePortalApiUrl */);
 
-        return transmitOfferOrAckPacket(offerPacket, request, lease, clientMac, broadcastFlag);
+        return transmitOfferOrAckPacket(offerPacket, DhcpOfferPacket.class.getSimpleName(), request,
+                lease, clientMac, broadcastFlag);
     }
 
     private boolean transmitAck(@NonNull DhcpPacket packet, @NonNull DhcpLease lease,
@@ -723,7 +723,8 @@ public class DhcpServer extends StateMachine {
                 // TODO (b/144402437): advertise the URL if known
                 packet.mRapidCommit && mDhcpRapidCommitEnabled, null /* captivePortalApiUrl */);
 
-        return transmitOfferOrAckPacket(ackPacket, packet, lease, clientMac, broadcastFlag);
+        return transmitOfferOrAckPacket(ackPacket, DhcpAckPacket.class.getSimpleName(), packet,
+                lease, clientMac, broadcastFlag);
     }
 
     private boolean transmitNak(DhcpPacket request, String message) {
@@ -739,9 +740,10 @@ public class DhcpServer extends StateMachine {
         return transmitPacket(nakPacket, DhcpNakPacket.class.getSimpleName(), dst);
     }
 
-    private boolean transmitOfferOrAckPacket(@NonNull ByteBuffer buf, @NonNull DhcpPacket request,
-            @NonNull DhcpLease lease, @NonNull MacAddress clientMac, boolean broadcastFlag) {
-        mLog.logf("Transmitting %s with lease %s", request.getClass().getSimpleName(), lease);
+    private boolean transmitOfferOrAckPacket(@NonNull ByteBuffer buf, @NonNull String packetTypeTag,
+            @NonNull DhcpPacket request, @NonNull DhcpLease lease, @NonNull MacAddress clientMac,
+            boolean broadcastFlag) {
+        mLog.logf("Transmitting %s with lease %s", packetTypeTag, lease);
         // Client may not yet respond to ARP for the lease address, which may be the destination
         // address. Add an entry to the ARP cache to save future ARP probes and make sure the
         // packet reaches its destination.
@@ -750,7 +752,7 @@ public class DhcpServer extends StateMachine {
             return false;
         }
         final Inet4Address dst = getAckOrOfferDst(request, lease, broadcastFlag);
-        return transmitPacket(buf, request.getClass().getSimpleName(), dst);
+        return transmitPacket(buf, packetTypeTag, dst);
     }
 
     private boolean transmitPacket(@NonNull ByteBuffer buf, @NonNull String packetTypeTag,
